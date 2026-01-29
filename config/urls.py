@@ -24,7 +24,7 @@ from accounts.views import CustomTokenObtainPairView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/', include('core.urls')),
+    path('api/shop/', include('shop.urls')),
     path('api/core/', include('core.urls')),
     path('api/auth/login/', CustomTokenObtainPairView.as_view(), name='jwt_login'),
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='jwt_refresh'),
