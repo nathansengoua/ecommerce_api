@@ -1,227 +1,130 @@
-# shop/views.py
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import ValidationError
-from rest_framework import status
-from django.shortcuts import get_object_or_404
-from django.db import transaction
-from django.db.models import Q
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand
 
-from shop.models import Product, Cart, CartItem, Order, OrderItem
-from shop.serializers import ProductSerializer, CartSerializer, OrderSerializer
-from accounts.permissions import IsAdminOrVendor, IsOwnerOrAdmin, IsClient
+from shop.models import Category, Product
 
 
-# ─── Product Views ───────────────────────────────────────────────
+class Command(BaseCommand):
+    help = "Seed the database with admin, vendors, clients, categories, and products for local testing"
 
-class ProductListCreateView(APIView):
+    def handle(self, *args, **options):
+        User = get_user_model()
 
-    def get_permissions(self):
-        if self.request.method == "POST":
-            return [IsAuthenticated(), IsAdminOrVendor()]
-        return [IsAuthenticated()]
-
-    def get(self, request):
-        products = Product.objects.select_related('category', 'owner').all()
-
-        search = request.query_params.get('search', '').strip()
-        category = request.query_params.get('category', None)
-        in_stock = request.query_params.get('in_stock', None)
-        min_price = request.query_params.get('min_price', None)
-        max_price = request.query_params.get('max_price', None)
-
-        if search:
-            products = products.filter(
-                Q(name__icontains=search) | Q(description__icontains=search)
-            )
-
-        if category:
-            products = products.filter(category_id=category)
-
-        if in_stock is not None:
-            if in_stock.lower() in ['true', '1', 'yes', 'y']:
-                products = products.filter(is_in_stock=True)
-            elif in_stock.lower() in ['false', '0', 'no', 'n']:
-                products = products.filter(is_in_stock=False)
-
-        if min_price is not None:
-            try:
-                products = products.filter(price__gte=Decimal(min_price))
-            except InvalidOperation:
-                raise ValidationError({"min_price": "Must be a valid number."})
-
-        if max_price is not None:
-            try:
-                products = products.filter(price__lte=Decimal(max_price))
-            except InvalidOperation:
-                raise ValidationError({"max_price": "Must be a valid number."})
-
-        serializer = ProductSerializer(products.distinct(), many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def post(self, request):
-        serializer = ProductSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save(owner=request.user)  # inject owner from token
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class ProductDetailView(APIView):
-
-    def get_permissions(self):
-        if self.request.method == "GET":
-            return [IsAuthenticated()]
-        return [IsAuthenticated(), IsAdminOrVendor(), IsOwnerOrAdmin()]
-
-    def get(self, request, pk):
-        product = get_object_or_404(Product, pk=pk)
-        serializer = ProductSerializer(product)
-        return Response(serializer.data)
-
-    def put(self, request, pk):
-        product = get_object_or_404(Product, pk=pk)
-        self.check_object_permissions(request, product)
-
-        # partial=True means you don't have to send all fields
-        serializer = ProductSerializer(product, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(self, request, pk):
-        product = get_object_or_404(Product, pk=pk)
-        self.check_object_permissions(request, product)
-        product.delete()
-        return Response({"message": "Product deleted."}, status=status.HTTP_204_NO_CONTENT)
-
-
-# ─── Cart Views ───────────────────────────────────────────────────
-
-class CartDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsClient]
-
-    def get(self, request):
-        cart, _ = Cart.objects.get_or_create(owner=request.user)
-        serializer = CartSerializer(cart)
-        return Response(serializer.data)
-
-
-class CartItemAddUpdateView(APIView):
-    permission_classes = [IsAuthenticated, IsClient]
-
-    def post(self, request):
-        cart, _ = Cart.objects.get_or_create(owner=request.user)
-        product = get_object_or_404(Product, id=request.data.get("product_id"))
-
-        item, created = CartItem.objects.get_or_create(cart=cart, product=product)
-
-        raw_quantity = request.data.get("quantity", item.quantity)
-        try:
-            quantity = int(raw_quantity)
-        except (TypeError, ValueError):
-            if created:
-                item.delete()  # don't leave a stray zero-quantity row behind
-            raise ValidationError({"quantity": "Must be an integer."})
-
-        if quantity <= 0:
-            if created:
-                item.delete()
-            raise ValidationError({"quantity": "Must be greater than zero."})
-
-        if quantity > product.stock_quantity:
-            if created:
-                item.delete()
-            raise ValidationError(
-                {"quantity": f"Only {product.stock_quantity} unit(s) of '{product.name}' in stock."}
-            )
-
-        item.quantity = quantity
-        item.save()
-
-        message = "Item added to cart." if created else "Cart updated."
-        return Response({"message": message}, status=status.HTTP_200_OK)
-
-
-class CartItemRemoveView(APIView):
-    permission_classes = [IsAuthenticated, IsClient]
-
-    def delete(self, request, product_id):
-        cart = get_object_or_404(Cart, owner=request.user)
-        item = get_object_or_404(CartItem, cart=cart, product_id=product_id)
-        item.delete()
-        return Response({"message": "Item removed."}, status=status.HTTP_204_NO_CONTENT)
-
-
-class CartClearView(APIView):
-    permission_classes = [IsAuthenticated, IsClient]
-
-    def post(self, request):
-        cart = get_object_or_404(Cart, owner=request.user)
-        cart.items.all().delete()
-        return Response({"message": "Cart cleared."}, status=status.HTTP_200_OK)
-
-
-# ─── Checkout & Orders ────────────────────────────────────────────
-
-class CheckoutView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    @transaction.atomic
-    def post(self, request):
-        cart, _ = Cart.objects.get_or_create(owner=request.user)
-        cart_items = cart.items.select_related("product")
-
-        if not cart_items.exists():
-            raise ValidationError({"detail": "Your cart is empty."})
-
-        total = 0
-        order = Order.objects.create(user=request.user, total_amount=0)
-
-        # Lock product rows for the duration of the transaction to prevent
-        # two concurrent checkouts from overselling the same stock.
-        product_ids = [item.product_id for item in cart_items]
-        locked_products = Product.objects.select_for_update().in_bulk(product_ids)
-
-        for item in cart_items:
-            product = locked_products[item.product_id]
-
-            if product.stock_quantity < item.quantity:
-                raise ValidationError(
-                    {"detail": f"'{product.name}' does not have enough stock."}
-                )
-
-            product.stock_quantity -= item.quantity
-            product.save()  # triggers model.save() → updates is_in_stock
-
-            OrderItem.objects.create(
-                order=order,
-                product=product,
-                quantity=item.quantity,
-                price=product.price
-            )
-
-            total += product.price * item.quantity
-
-        order.total_amount = total
-        order.save()
-
-        cart.items.all().delete()
-
-        return Response(
-            {"message": "Order placed.", "order_id": order.id},
-            status=status.HTTP_201_CREATED
+        admin_user, created = User.objects.get_or_create(
+            email="admin@example.com",
+            defaults={
+                "first_name": "Admin",
+                "last_name": "User",
+                "role": "admin",
+                "is_staff": True,
+                "is_superuser": True,
+                "is_active": True,
+            },
         )
+        if created:
+            admin_user.set_password("adminpass")
+            admin_user.save()
 
+        vendor_users = []
+        for email, first_name, last_name, password in [
+            ("vendor1@example.com", "Vendor", "One", "vendorpass1"),
+            ("vendor2@example.com", "Vendor", "Two", "vendorpass2"),
+        ]:
+            user, created = User.objects.get_or_create(
+                email=email,
+                defaults={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "role": "vendor",
+                    "is_staff": False,
+                    "is_superuser": False,
+                    "is_active": True,
+                },
+            )
+            if created:
+                user.set_password(password)
+                user.save()
+            vendor_users.append(user)
 
-class MyOrdersView(APIView):
-    permission_classes = [IsAuthenticated]
+        client_users = []
+        for email, first_name, last_name, password in [
+            ("client1@example.com", "Client", "One", "clientpass1"),
+            ("client2@example.com", "Client", "Two", "clientpass2"),
+            ("client3@example.com", "Client", "Three", "clientpass3"),
+            ("client4@example.com", "Client", "Four", "clientpass4"),
+        ]:
+            user, created = User.objects.get_or_create(
+                email=email,
+                defaults={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "role": "client",
+                    "is_staff": False,
+                    "is_superuser": False,
+                    "is_active": True,
+                },
+            )
+            if created:
+                user.set_password(password)
+                user.save()
+            client_users.append(user)
 
-    def get(self, request):
-        orders = Order.objects.filter(user=request.user).prefetch_related('items__product')
-        serializer = OrderSerializer(orders, many=True)
-        return Response(serializer.data)
+        category_names = ["Electronics", "Clothing", "Books", "Home"]
+        category_descriptions = {
+            "Electronics": "Phones, laptops, accessories",
+            "Clothing": "Casual and formal wear",
+            "Books": "Programming and educational books",
+            "Home": "Kitchen and home essentials",
+        }
+
+        categories = {}
+        for name in category_names:
+            category, _ = Category.objects.get_or_create(
+                name=name,
+                defaults={"description": category_descriptions[name]},
+            )
+            categories[name] = category
+
+        products = [
+            ("Electronics", "Wireless Mouse", "Bluetooth mouse for laptops", Decimal("19.99"), 10),
+            ("Electronics", "Mechanical Keyboard", "RGB gaming keyboard", Decimal("49.99"), 0),
+            ("Electronics", "USB-C Charger", "Fast charging adapter", Decimal("14.50"), 8),
+            ("Electronics", "Noise-Cancelling Headphones", "Over-ear wireless headphones", Decimal("89.99"), 5),
+            ("Clothing", "White T-Shirt", "Cotton casual t-shirt", Decimal("12.99"), 15),
+            ("Clothing", "Denim Jacket", "Classic denim jacket", Decimal("39.99"), 4),
+            ("Clothing", "Black Sneakers", "Comfortable everyday sneakers", Decimal("34.99"), 12),
+            ("Clothing", "Formal Shirt", "Smart business shirt", Decimal("24.99"), 7),
+            ("Books", "Python Book", "Learn Django and DRF", Decimal("29.99"), 5),
+            ("Books", "Django Book", "Build web apps with Django", Decimal("34.99"), 3),
+            ("Books", "JavaScript Guide", "Frontend essentials", Decimal("21.99"), 9),
+            ("Books", "System Design Basics", "Learn architecture and scaling", Decimal("27.99"), 6),
+            ("Home", "Ceramic Mug", "Coffee mug for home use", Decimal("8.99"), 20),
+            ("Home", "Throw Blanket", "Soft fleece blanket", Decimal("18.99"), 11),
+            ("Home", "Desk Lamp", "LED desk lamp", Decimal("22.99"), 10),
+            ("Home", "Scented Candle", "Relaxation candle", Decimal("9.99"), 14),
+        ]
+
+        owners = [vendor_users[0], vendor_users[1], admin_user]
+        owner_index = 0
+
+        for category_name, name, description, price, stock_quantity in products:
+            owner = owners[owner_index % len(owners)]
+            Product.objects.get_or_create(
+                name=name,
+                category=categories[category_name],
+                defaults={
+                    "owner": owner,
+                    "description": description,
+                    "price": price,
+                    "stock_quantity": stock_quantity,
+                },
+            )
+            owner_index += 1
+
+        self.stdout.write(self.style.SUCCESS("Seed data created successfully."))
+        self.stdout.write("Admin login: admin@example.com / adminpass")
+        self.stdout.write("Vendors: vendor1@example.com / vendorpass1, vendor2@example.com / vendorpass2")
+        self.stdout.write("Clients: client1@example.com / clientpass1, client2@example.com / clientpass2, client3@example.com / clientpass3, client4@example.com / clientpass4")
+        self.stdout.write("Categories and products seeded for local testing.")
