@@ -10,12 +10,12 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db.models import Q
 
-from .models import Product, Cart, CartItem, Order, OrderItem
-from .serializers import ProductSerializer, CartSerializer, OrderSerializer
+from shop.models import Product, Cart, CartItem, Order, OrderItem
+from shop.serializers import ProductSerializer, CartSerializer, OrderSerializer
 from accounts.permissions import IsAdminOrVendor, IsOwnerOrAdmin, IsClient
 
 
-# ─── Product Views ────────────────────────────────────────────────
+# ─── Product Views ───────────────────────────────────────────────
 
 class ProductListCreateView(APIView):
 
