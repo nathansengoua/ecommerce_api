@@ -1,4 +1,5 @@
 # shop/views.py
+import stripe
 from decimal import Decimal, InvalidOperation
 
 from rest_framework.views import APIView
@@ -13,7 +14,9 @@ from django.db.models import Q
 from .models import Product, Cart, CartItem, Order, OrderItem
 from .serializers import ProductSerializer, CartSerializer, OrderSerializer
 from accounts.permissions import IsAdminOrVendor, IsOwnerOrAdmin, IsClient
+from django.conf import settings
 
+stripe.api_key = settings.STRIPE_SECRET_KEY
 
 # ─── Product Views ────────────────────────────────────────────────
 
